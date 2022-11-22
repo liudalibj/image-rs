@@ -16,65 +16,67 @@ pub fn unpack(input: Vec<u8>, destination: &Path) -> Result<()> {
     let mut archive = Archive::new(input.as_slice());
 
     if destination.exists() {
-        return Err(anyhow!(
-            "unpack destination {:?} already exists",
-            destination
-        ));
-    }
+        // return Err(anyhow!(
+        //     "unpack destination {:?} already exists",
+        //     destination
+        // ));
+        // trust pre result
+        Ok(())
+    } else {
+        fs::create_dir_all(destination)?;
 
-    fs::create_dir_all(destination)?;
+        let mut dirs: HashMap<CString, [timeval; 2]> = HashMap::default();
+        for file in archive.entries()? {
+            let mut file = file?;
+            file.unpack_in(destination)?;
 
-    let mut dirs: HashMap<CString, [timeval; 2]> = HashMap::default();
-    for file in archive.entries()? {
-        let mut file = file?;
-        file.unpack_in(destination)?;
+            // tar-rs crate only preserve timestamps of files,
+            // symlink file and directory are not covered.
+            // upstream fix PR: https://github.com/alexcrichton/tar-rs/pull/217
+            if file.header().entry_type().is_symlink() || file.header().entry_type().is_dir() {
+                let mtime = file.header().mtime()? as i64;
 
-        // tar-rs crate only preserve timestamps of files,
-        // symlink file and directory are not covered.
-        // upstream fix PR: https://github.com/alexcrichton/tar-rs/pull/217
-        if file.header().entry_type().is_symlink() || file.header().entry_type().is_dir() {
-            let mtime = file.header().mtime()? as i64;
+                let atime = timeval {
+                    tv_sec: mtime,
+                    tv_usec: 0,
+                };
+                let path = CString::new(format!(
+                    "{}/{}",
+                    destination.display(),
+                    file.path()?.display()
+                ))?;
 
-            let atime = timeval {
-                tv_sec: mtime,
-                tv_usec: 0,
-            };
-            let path = CString::new(format!(
-                "{}/{}",
-                destination.display(),
-                file.path()?.display()
-            ))?;
+                let times = [atime, atime];
 
-            let times = [atime, atime];
-
-            if file.header().entry_type().is_dir() {
-                dirs.insert(path, times);
-            } else {
-                let ret = unsafe { libc::lutimes(path.as_ptr(), times.as_ptr()) };
-                if ret != 0 {
-                    return Err(anyhow!(
-                        "change symlink file: {:?} utime error: {:?}",
-                        path,
-                        io::Error::last_os_error()
-                    ));
+                if file.header().entry_type().is_dir() {
+                    dirs.insert(path, times);
+                } else {
+                    let ret = unsafe { libc::lutimes(path.as_ptr(), times.as_ptr()) };
+                    if ret != 0 {
+                        return Err(anyhow!(
+                            "change symlink file: {:?} utime error: {:?}",
+                            path,
+                            io::Error::last_os_error()
+                        ));
+                    }
                 }
             }
         }
-    }
 
-    // Directory timestamps need update after all files are extracted.
-    for (k, v) in dirs.iter() {
-        let ret = unsafe { libc::utimes(k.as_ptr(), v.as_ptr()) };
-        if ret != 0 {
-            return Err(anyhow!(
-                "change directory: {:?} utime error: {:?}",
-                k,
-                io::Error::last_os_error()
-            ));
+        // Directory timestamps need update after all files are extracted.
+        for (k, v) in dirs.iter() {
+            let ret = unsafe { libc::utimes(k.as_ptr(), v.as_ptr()) };
+            if ret != 0 {
+                return Err(anyhow!(
+                    "change directory: {:?} utime error: {:?}",
+                    k,
+                    io::Error::last_os_error()
+                ));
+            }
         }
-    }
 
-    Ok(())
+        Ok(())
+    }
 }
 
 #[cfg(test)]
